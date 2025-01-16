@@ -1,7 +1,7 @@
 #include "stdafx.h"
 #include <cctype>
 
-#include "pugixml.hpp"
+#include "cJSON.h"
 
 #include "logging.h"
 #include "lyric_source.h"
@@ -51,12 +51,13 @@ static std::string remove_chars_for_url(const std::string_view input)
 std::vector<LyricDataRaw> GeniusComSource::search(const LyricSearchParams& params, abort_callback& abort)
 {
     auto request = http_client::get()->create_request("GET");
+    
+    request->add_header("Authorization: Bearer ZTejoT_ojOEasIkT9WrMBhBQOz6eYKK5QULCMECmOhvwqjRZ6WbpamFe3geHnvp3"); //anonymous Android app token
 
-    std::string url = "https://genius.com/";
+    std::string url = "https://api.genius.com/search?q=";
     url += remove_chars_for_url(params.artist);
-    url += '-';
+    url += ' ';
     url += remove_chars_for_url(params.title);
-    url += "-lyrics";
 
     pfc::string8 content;
     try
@@ -71,52 +72,91 @@ std::vector<LyricDataRaw> GeniusComSource::search(const LyricSearchParams& param
         return {};
     }
 
+    {   // Parser gets its own scope
+        const cJSON* apiResponse = NULL;
+        const cJSON* apiHits = NULL;
+        const cJSON* apiResult = NULL;
+        const cJSON* apiPath = NULL;
+
+        cJSON* apiRes = cJSON_Parse(content.c_str());
+        if (apiRes == NULL) {
+            LOG_WARN("Failed to download genius.com page %s: %s", url.c_str(), "Failed to parse JSON");
+            cJSON_Delete(apiRes);
+            return {};
+        }
+
+        apiResponse = cJSON_GetObjectItemCaseSensitive(apiRes, "response");
+        apiHits = cJSON_GetObjectItemCaseSensitive(apiResponse, "hits");
+
+        if (cJSON_GetArraySize(apiHits) == 0) {
+            LOG_INFO("Failed to download genius.com page: No hits on search");
+            cJSON_Delete(apiRes);
+            return {};
+        }
+
+        apiResult = cJSON_GetObjectItemCaseSensitive(cJSON_GetArrayItem(apiHits, 0), "result");
+        apiPath = cJSON_GetObjectItemCaseSensitive(apiResult, "api_path");
+
+        url = "https://api.genius.com" + std::string(apiPath->valuestring) + "?text_format=plain";
+
+        cJSON_Delete(apiRes);
+    }
+    
     LOG_INFO("Page %s retrieved", url.c_str());
     std::string lyric_text;
-    pugi::xml_document doc;
-    load_html_document(content.c_str(), doc);
-
-    const char* xpath_queries[] = { "//div[@class='lyrics']", "//div[contains(@class, 'Lyrics__Container')]" };
-    for(const char* query_str : xpath_queries)
+    
+    try
     {
-        pugi::xpath_query query_lyricdivs(query_str);
-        pugi::xpath_node_set lyricdivs = query_lyricdivs.evaluate_node_set(doc);
+        file_ptr response_file = request->run(url.c_str(), abort);
+        response_file->read_string_raw(content, abort);
+        // NOTE: We're assuming here that the response is encoded in UTF-8 
+    }
+    catch (const std::exception& e)
+    {
+        LOG_WARN("Failed to download genius.com page %s: %s", url.c_str(), e.what());
+        return {};
+    }
 
-        if(!lyricdivs.empty())
-        {
-            for(const pugi::xpath_node& node : lyricdivs)
-            {
-                add_all_text_to_string(lyric_text, node.node());
+    LOG_INFO("Successfully retrieved lyrics from %s", url.c_str());
 
-                // A div is a block element, which means that by definition
-                // it effectively includes a trailing line-break.
-                // We won't get that line-break by parsing the HTML text content,
-                // so add it here manually.
-                lyric_text += "\r\n";
-            }
-            break;
+    LyricDataRaw result = {};
+    result.source_id = id();
+    result.source_path = url;
+    result.artist = params.artist;
+    result.album = params.album;
+    result.title = params.title;
+    result.type = LyricType::Unsynced;
+
+    {   // Parser gets its own scope
+        const cJSON* apiResponse = NULL;
+        const cJSON* apiSong = NULL;
+        const cJSON* apiLyrics = NULL;
+        const cJSON* apiLyricsPlain = NULL;
+
+        cJSON* apiRes = cJSON_Parse(content.c_str());
+        if (apiRes == NULL) {
+            LOG_WARN("Failed to download genius.com page %s: %s", url.c_str(), "Failed to parse JSON");
+            cJSON_Delete(apiRes);
+            return {};
         }
+
+        apiResponse = cJSON_GetObjectItemCaseSensitive(apiRes, "response");
+        apiSong = cJSON_GetObjectItemCaseSensitive(apiResponse, "song");
+        apiLyrics = cJSON_GetObjectItemCaseSensitive(apiSong, "lyrics");
+        apiLyricsPlain = cJSON_GetObjectItemCaseSensitive(apiLyrics, "plain");
+
+        if (apiLyricsPlain->valuestring == NULL) {
+            LOG_WARN("Failed to download from genius.com page: No lyrics data!");
+            cJSON_Delete(apiRes);
+            return {};
+        }
+        
+        result.text_bytes = string_to_raw_bytes(std::string_view(apiLyricsPlain->valuestring));
+
+        cJSON_Delete(apiRes);
     }
 
-    if(lyric_text.empty())
-    {
-        throw new std::runtime_error("Failed to parse lyrics, the page format may have changed");
-    }
-    else
-    {
-        LOG_INFO("Successfully retrieved lyrics from %s", url.c_str());
-        const std::string_view trimmed_text = trim_surrounding_whitespace(lyric_text);
-
-        LyricDataRaw result = {};
-        result.source_id = id();
-        result.source_path = url;
-        result.artist = params.artist;
-        result.album = params.album;
-        result.title = params.title;
-        result.type = LyricType::Unsynced;
-        result.text_bytes = string_to_raw_bytes(trimmed_text);
-        return {std::move(result)};
-    }
+    return {std::move(result)};
 }
 
 bool GeniusComSource::lookup(LyricDataRaw& /*data*/, abort_callback& /*abort*/)
