@@ -101,10 +101,10 @@ std::vector<LyricDataRaw> GeniusComSource::search(const LyricSearchParams& param
 
         int results = 0;
         cJSON_ArrayForEach(searchHit, searchHits) {
+            results++;
             if (results > resultLimit) {
                 continue;
             }
-            results++;
 
             searchResult = cJSON_GetObjectItemCaseSensitive(searchHit, "result");
             searchPath = cJSON_GetObjectItemCaseSensitive(searchResult, "api_path");
