@@ -9,6 +9,8 @@
 
 static const GUID src_guid = { 0xb4cf497f, 0xd2c, 0x45ff, { 0xaa, 0x46, 0xf1, 0x45, 0xa7, 0xf, 0x90, 0x14 } };
 
+constexpr int resultLimit = 3;
+
 class GeniusComSource : public LyricSourceRemote
 {
     const GUID& id() const final { return src_guid; }
@@ -72,91 +74,119 @@ std::vector<LyricDataRaw> GeniusComSource::search(const LyricSearchParams& param
         return {};
     }
 
-    {   // Parser gets its own scope
-        const cJSON* apiResponse = NULL;
-        const cJSON* apiHits = NULL;
-        const cJSON* apiResult = NULL;
-        const cJSON* apiPath = NULL;
+    std::vector<LyricDataRaw> lyrics;
 
-        cJSON* apiRes = cJSON_Parse(content.c_str());
-        if (apiRes == NULL) {
+    {   // Parser gets its own scope
+        const cJSON* searchResponse = NULL;
+        const cJSON* searchHits = NULL;
+        const cJSON* searchHit = NULL;
+        const cJSON* searchResult = NULL;
+        const cJSON* searchPath = NULL;
+
+        cJSON* searchRes = cJSON_Parse(content.c_str());
+        if (searchRes == NULL) {
             LOG_WARN("Failed to download genius.com page %s: %s", url.c_str(), "Failed to parse JSON");
-            cJSON_Delete(apiRes);
+            cJSON_Delete(searchRes);
             return {};
         }
 
-        apiResponse = cJSON_GetObjectItemCaseSensitive(apiRes, "response");
-        apiHits = cJSON_GetObjectItemCaseSensitive(apiResponse, "hits");
+        searchResponse = cJSON_GetObjectItemCaseSensitive(searchRes, "response");
+        searchHits = cJSON_GetObjectItemCaseSensitive(searchResponse, "hits");
 
-        if (cJSON_GetArraySize(apiHits) == 0) {
+        if (cJSON_GetArraySize(searchHits) == 0) {
             LOG_INFO("Failed to download genius.com page: No hits on search");
-            cJSON_Delete(apiRes);
+            cJSON_Delete(searchRes);
             return {};
         }
 
-        apiResult = cJSON_GetObjectItemCaseSensitive(cJSON_GetArrayItem(apiHits, 0), "result");
-        apiPath = cJSON_GetObjectItemCaseSensitive(apiResult, "api_path");
+        int results = 0;
+        cJSON_ArrayForEach(searchHit, searchHits) {
+            if (results > resultLimit) {
+                continue;
+            }
+            results++;
 
-        url = "https://api.genius.com" + std::string(apiPath->valuestring) + "?text_format=plain";
+            searchResult = cJSON_GetObjectItemCaseSensitive(searchHit, "result");
+            searchPath = cJSON_GetObjectItemCaseSensitive(searchResult, "api_path");
 
-        cJSON_Delete(apiRes);
-    }
-    
-    LOG_INFO("Page %s retrieved", url.c_str());
-    std::string lyric_text;
-    
-    try
-    {
-        file_ptr response_file = request->run(url.c_str(), abort);
-        response_file->read_string_raw(content, abort);
-        // NOTE: We're assuming here that the response is encoded in UTF-8 
-    }
-    catch (const std::exception& e)
-    {
-        LOG_WARN("Failed to download genius.com page %s: %s", url.c_str(), e.what());
-        return {};
-    }
+            url = "https://api.genius.com" + std::string(searchPath->valuestring) + "?text_format=plain";
 
-    LOG_INFO("Successfully retrieved lyrics from %s", url.c_str());
+            LOG_INFO("Page %s retrieved", url.c_str());
+            std::string lyric_text;
 
-    LyricDataRaw result = {};
-    result.source_id = id();
-    result.source_path = url;
-    result.artist = params.artist;
-    result.album = params.album;
-    result.title = params.title;
-    result.type = LyricType::Unsynced;
+            try
+            {
+                file_ptr response_file = request->run(url.c_str(), abort);
+                response_file->read_string_raw(content, abort);
+                // NOTE: We're assuming here that the response is encoded in UTF-8 
+            }
+            catch (const std::exception& e)
+            {
+                LOG_WARN("Failed to download genius.com page %s: %s", url.c_str(), e.what());
+                return {};
+            }
 
-    {   // Parser gets its own scope
-        const cJSON* apiResponse = NULL;
-        const cJSON* apiSong = NULL;
-        const cJSON* apiLyrics = NULL;
-        const cJSON* apiLyricsPlain = NULL;
+            LOG_INFO("Successfully retrieved lyrics from %s", url.c_str());
 
-        cJSON* apiRes = cJSON_Parse(content.c_str());
-        if (apiRes == NULL) {
-            LOG_WARN("Failed to download genius.com page %s: %s", url.c_str(), "Failed to parse JSON");
-            cJSON_Delete(apiRes);
-            return {};
+            LyricDataRaw result = {};
+            result.source_id = id();
+            result.source_path = url;
+            result.artist = params.artist;
+            result.album = params.album;
+            result.title = params.title;
+            result.type = LyricType::Unsynced;
+
+            {   // Parser gets its own scope
+                const cJSON* songResponse = NULL;
+                const cJSON* songSong = NULL;
+                const cJSON* songLyrics = NULL;
+                const cJSON* songLyricsPlain = NULL;
+                const cJSON* songTitle = NULL;
+                const cJSON* songAlbum = NULL;
+                const cJSON* songAlbumName = NULL;
+                const cJSON* songAlbumArtist = NULL;
+
+                cJSON* songRes = cJSON_Parse(content.c_str());
+                if (songRes == NULL) {
+                    LOG_WARN("Failed to download genius.com page %s: %s", url.c_str(), "Failed to parse JSON");
+                    cJSON_Delete(songRes);
+                    return {};
+                }
+
+                songResponse = cJSON_GetObjectItemCaseSensitive(songRes, "response");
+                songSong = cJSON_GetObjectItemCaseSensitive(songResponse, "song");
+                songLyrics = cJSON_GetObjectItemCaseSensitive(songSong, "lyrics");
+                songLyricsPlain = cJSON_GetObjectItemCaseSensitive(songLyrics, "plain");
+                songTitle = cJSON_GetObjectItemCaseSensitive(songSong, "title");
+                songAlbum = cJSON_GetObjectItemCaseSensitive(songSong, "album");
+
+                if (songLyricsPlain->valuestring == NULL) {
+                    LOG_WARN("Failed to download from genius.com page: No lyrics data!");
+                    cJSON_Delete(songRes);
+                    return {};
+                }
+
+                if (songTitle->valuestring) { result.title = songTitle->valuestring; };
+
+                if (songAlbum->valuestring) {
+                    songAlbumName = cJSON_GetObjectItemCaseSensitive(songAlbum, "name");
+                    songAlbumArtist = cJSON_GetObjectItemCaseSensitive(songAlbum, "primary_artist_names");
+
+                    if (songAlbumName->valuestring) { result.title = songAlbumName->valuestring; };
+                    if (songAlbumArtist->valuestring) { result.title = songAlbumArtist->valuestring; };
+                }
+
+                result.text_bytes = string_to_raw_bytes(std::string_view(songLyricsPlain->valuestring));
+                lyrics.push_back(result);
+
+                cJSON_Delete(songRes);
+            }
         }
 
-        apiResponse = cJSON_GetObjectItemCaseSensitive(apiRes, "response");
-        apiSong = cJSON_GetObjectItemCaseSensitive(apiResponse, "song");
-        apiLyrics = cJSON_GetObjectItemCaseSensitive(apiSong, "lyrics");
-        apiLyricsPlain = cJSON_GetObjectItemCaseSensitive(apiLyrics, "plain");
-
-        if (apiLyricsPlain->valuestring == NULL) {
-            LOG_WARN("Failed to download from genius.com page: No lyrics data!");
-            cJSON_Delete(apiRes);
-            return {};
-        }
-        
-        result.text_bytes = string_to_raw_bytes(std::string_view(apiLyricsPlain->valuestring));
-
-        cJSON_Delete(apiRes);
+        cJSON_Delete(searchRes);
     }
 
-    return {std::move(result)};
+    return lyrics;
 }
 
 bool GeniusComSource::lookup(LyricDataRaw& /*data*/, abort_callback& /*abort*/)
